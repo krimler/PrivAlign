@@ -1,6 +1,9 @@
 import random
 import numpy as np
 
+# --- Constants ---
+MAX_QUERY_DEPTH = 7
+
 # --- Dummy Local Model ---
 class DummyLocalModel:
     def predict(self, prompt):
@@ -15,8 +18,8 @@ class DummyMentor:
         self.name = name
         self.epsilon = epsilon
 
-    def query(self, prompt):
-        return f"Mentor({self.name}) reply: [answering obfuscated] {prompt}"
+    def query(self, prompt, context=None):
+        return f"Mentor({self.name}) reply to preference: {context} → {prompt}"
 
 # --- Domain Transfer Functions ---
 def domain_transfer_function(prompt):
@@ -24,10 +27,10 @@ def domain_transfer_function(prompt):
         "patient": "personX",
         "doctor": "advisor",
         "diagnosis": "condition",
-        "prescription": "recommendation"
+        "prescription": "recommendation",
     }
-    for k, v in substitutions.items():
-        prompt = prompt.replace(k, v)
+    for key, val in substitutions.items():
+        prompt = prompt.replace(key, val)
     return prompt
 
 def reverse_transfer_function(prompt):
@@ -35,10 +38,10 @@ def reverse_transfer_function(prompt):
         "personX": "patient",
         "advisor": "doctor",
         "condition": "diagnosis",
-        "recommendation": "prescription"
+        "recommendation": "prescription",
     }
-    for k, v in substitutions.items():
-        prompt = prompt.replace(k, v)
+    for key, val in substitutions.items():
+        prompt = prompt.replace(key, val)
     return prompt
 
 # --- PPO Reward and KPO Conversion ---
@@ -79,35 +82,53 @@ class Mentee:
             chars[idx] = random.choice("abcdefghijklmnopqrstuvwxyz ")
         return ''.join(chars)
 
-    def query(self, prompt):
+    def query(self, prompt, depth=0):
+        if depth > MAX_QUERY_DEPTH:
+            raise RuntimeError("Failed to obtain high-confidence response within recursion limit.")
+
         score = self.confidence_score(prompt)
         if score >= self.threshold:
             return self.model.predict(prompt)["text"]
 
-        # Escalation path with PPO → KPO → PPO
+        return self._mentor_escalation(prompt, depth)
+
+    def _mentor_escalation(self, prompt, depth):
         x_prime = self.T(prompt)
         x_prime_noisy = self.add_dp_noise(x_prime, self.epsilon_query)
 
-        # Simulate PPO-style reward responses
-        responses = [
-            "They should reduce salt intake.",
-            "Consider ACE inhibitors under doctor supervision."
-        ]
-        r1 = reward_model(prompt, responses[0])
-        r2 = reward_model(prompt, responses[1])
-        p1, p2 = kpo_label_from_rewards(r1, r2, beta=2.0)
-        print(f"KPO Labels (PPO → KPO): {p1:.2f}, {p2:.2f}")
+        cand_a = "Reduce salt intake."
+        cand_b = "Use ACE inhibitors under supervision."
+        r_a = reward_model(prompt, cand_a)
+        r_b = reward_model(prompt, cand_b)
+        p_a, p_b = kpo_label_from_rewards(r_a, r_b, beta=2.0)
+        chosen = ppo_approx_response(prompt, [cand_a, cand_b])
 
-        # Reverse KPO → PPO: select best response by reward again
-        mentor_input = ppo_approx_response(prompt, responses)
+        preference_context = (
+            f"Preference between two responses:
+"
+            f"A: {cand_a}
+"
+            f"B: {cand_b}
+"
+            f"Soft preference: A={p_a:.2f}, B={p_b:.2f}
+"
+            f"Preferred direction: {'A' if r_a > r_b else 'B'}"
+        )
 
-        best_mentor = min(self.mentors.items(), key=lambda item: item[1].epsilon)
-        mentor_name, mentor = best_mentor
-        self.budget_used += self.epsilon_query + mentor.epsilon
+        best_mentor = min(self.mentors.items(), key=lambda m: m[1].epsilon)[1]
+        self.budget_used += self.epsilon_query + best_mentor.epsilon
 
-        response = mentor.query(x_prime_noisy)
-        decoded = self.T_inv(response)
-        return f"[Mentor: {mentor_name}] {decoded}"
+        y_prime = best_mentor.query(x_prime_noisy, context=preference_context)
+        y = self.T_inv(y_prime)
+
+        post_noise_score = self.confidence_score(y)
+        if post_noise_score < self.threshold:
+            return self.query(prompt, depth=depth + 1)
+
+        reward = reward_model(prompt, y)
+        print(f"Recovered PPO reward for mentor response: {reward:.3f}")
+
+        return ppo_approx_response(prompt, [y, chosen])
 
 # --- Demo Execution ---
 if __name__ == "__main__":
