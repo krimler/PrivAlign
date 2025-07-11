@@ -1,3 +1,4 @@
+# Simulated Federated RLHF Training Pipeline (toy example)
 import random
 import numpy as np
 
@@ -99,10 +100,56 @@ def compare_to_mentee_vs_federated(mentee_prompt, mentee_response_A, mentee_resp
     print("[Federated RLHF Preference Agreement Example]")
     print("(Showing top preferences from federated clients with DP noise)")
 
-# Demo execution
+# --- Token Cost Comparison ---
+def simulate_token_cost(prompt, response, method):
+    base_tokens = len(prompt.split()) + len(response.split())
+    if method == "mentee":
+        # Domain-transferred prompt is simpler; assume 40% reduction in prompt size
+        kpo_prompt_tokens = int(len(prompt.split()) * 0.6)
+        kpo_response_tokens = len(response.split())
+        total = kpo_prompt_tokens + kpo_response_tokens
+        return total
+    elif method == "federated":
+        return base_tokens * 0.25
+
+# --- DP-SFT Simulation (baseline) ---
+class DPSFTClient:
+    def __init__(self, epsilon=0.5):
+        self.epsilon = epsilon
+
+    def reward(self, prompt, response):
+        base_score = len(response) / len(prompt)
+        noise = np.random.laplace(0.0, 1 / self.epsilon)
+        return base_score + noise
+
+    def soft_preference(self, prompt, resp_a, resp_b):
+        s1 = self.reward(prompt, resp_a)
+        s2 = self.reward(prompt, resp_b)
+        beta = 2.0
+        p1 = np.exp(beta * s1) / (np.exp(beta * s1) + np.exp(beta * s2))
+        return p1, 1 - p1
+
+def compare_to_dp_sft(mentee_prompt, mentee_response_A, mentee_response_B):
+    client = DPSFTClient(epsilon=0.5)
+    p1, p2 = client.soft_preference(mentee_prompt, mentee_response_A, mentee_response_B)
+    print("
+[DP-SFT Soft Preference (ε=0.5)]")
+    print(f"Prompt: {mentee_prompt}")
+    print(f"Response A: {mentee_response_A}")
+    print(f"Response B: {mentee_response_B}")
+    print(f"Soft Preference → A: {p1:.2f}, B: {p2:.2f}
+")
+
+    mentee_pref = mentee_response_A if len(mentee_response_A) > len(mentee_response_B) else mentee_response_B
+    dp_sft_pref = mentee_response_A if p1 > p2 else mentee_response_B
+    agreement = mentee_pref == dp_sft_pref
+    print(f"[Agreement with Mentee Preference]: {agreement}
+")
 if __name__ == "__main__":
     clients = [RLHFClient(f"Client{i}") for i in range(3)]
     aggregator = RLHFAggregator(clients)
+
+    compare_to_dp_sft(mentee_prompt, mentee_response_A, mentee_response_B)
 
     # Compare mentee preference to federated
     mentee_prompt = "What prescription is recommended for patient with recent diagnosis?"
@@ -112,6 +159,14 @@ if __name__ == "__main__":
 
     aggregator.collect_preferences()
     trained_pairs = aggregator.train_global_model()
+
+    mentee_tokens = simulate_token_cost(mentee_prompt, mentee_response_A, method="mentee")
+    federated_tokens = simulate_token_cost(mentee_prompt, mentee_response_A, method="federated")
+    print(f"
+[Token Cost per Query Resolution]
+Mentee Token Cost: {mentee_tokens:.1f}
+Federated Token Cost (per client, amortized): {federated_tokens:.1f}
+")
 
     for i, (prompt, win, lose) in enumerate(trained_pairs[:5]):
         conflict = win not in [mentee_response_A, mentee_response_B]
